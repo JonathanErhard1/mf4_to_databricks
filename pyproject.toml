@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mf4-to-databricks"
+version = "0.1.0"
+description = "Tools for analyzing MF4 measurement files and uploading data to Databricks"
+requires-python = ">=3.10"
+dependencies = [
+    "asammdf>=7.0",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+databricks = [
+    "databricks-sdk",
+    "databricks-connect",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.gui-scripts]
+mf4-gui = "mf4_to_databricks.gui.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
