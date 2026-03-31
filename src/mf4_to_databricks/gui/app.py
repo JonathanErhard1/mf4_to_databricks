@@ -1,4 +1,4 @@
-"""Main GUI application for MF4 analysis and Parquet export."""
+"""Main GUI application for MF4 analysis, plotting, and Parquet export."""
 
 from __future__ import annotations
 
@@ -6,6 +6,13 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
+
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+
+from asammdf import MDF
 
 from mf4_to_databricks.analyze_mf4 import analyze_mf4
 from mf4_to_databricks.converter import mf4_to_dataframe, dataframe_to_parquet
@@ -23,6 +30,7 @@ class App(tk.Tk):
         # State
         self._mf4_path: Path | None = None
         self._analysis: dict | None = None
+        self._mdf: MDF | None = None
 
         self._build_ui()
 
@@ -74,7 +82,12 @@ class App(tk.Tk):
         sb_tree.pack(side="right", fill="y")
         self._tree.pack(fill="both", expand=True)
 
-        # Tab 3: Export
+        # Tab 3: Plot
+        self._frm_plot = ttk.Frame(self._notebook)
+        self._notebook.add(self._frm_plot, text="Plot")
+        self._build_plot_tab()
+
+        # Tab 4: Export
         self._frm_export = ttk.Frame(self._notebook, padding=10)
         self._notebook.add(self._frm_export, text="Parquet Export")
         self._build_export_tab()
@@ -84,6 +97,65 @@ class App(tk.Tk):
         ttk.Label(self, textvariable=self._var_status, relief="sunken", anchor="w").pack(
             fill="x", padx=10, pady=(0, 8)
         )
+
+    def _build_plot_tab(self) -> None:
+        frm = self._frm_plot
+
+        # Left: channel selector
+        frm_left = ttk.Frame(frm, width=260)
+        frm_left.pack(side="left", fill="y", padx=(4, 0), pady=4)
+        frm_left.pack_propagate(False)
+
+        ttk.Label(frm_left, text="Kanäle filtern:").pack(anchor="w", padx=4, pady=(4, 0))
+        self._var_ch_filter = tk.StringVar()
+        self._var_ch_filter.trace_add("write", self._on_channel_filter)
+        ttk.Entry(frm_left, textvariable=self._var_ch_filter).pack(fill="x", padx=4, pady=2)
+
+        ttk.Label(frm_left, text="Verfügbare Kanäle:").pack(anchor="w", padx=4, pady=(4, 0))
+        frm_list = ttk.Frame(frm_left)
+        frm_list.pack(fill="both", expand=True, padx=4)
+        sb_ch = ttk.Scrollbar(frm_list)
+        sb_ch.pack(side="right", fill="y")
+        self._lst_channels = tk.Listbox(frm_list, selectmode="extended", yscrollcommand=sb_ch.set)
+        self._lst_channels.pack(fill="both", expand=True)
+        sb_ch.config(command=self._lst_channels.yview)
+        self._all_channel_names: list[str] = []
+
+        frm_btns = ttk.Frame(frm_left)
+        frm_btns.pack(fill="x", padx=4, pady=4)
+        ttk.Button(frm_btns, text="▶ Plotten", command=self._on_plot).pack(side="left")
+        ttk.Button(frm_btns, text="Alle abwählen", command=self._on_clear_selection).pack(side="right")
+
+        ttk.Label(frm_left, text="Aktive Kanäle:").pack(anchor="w", padx=4, pady=(4, 0))
+        frm_active = ttk.Frame(frm_left)
+        frm_active.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        sb_active = ttk.Scrollbar(frm_active)
+        sb_active.pack(side="right", fill="y")
+        self._lst_active = tk.Listbox(frm_active, yscrollcommand=sb_active.set)
+        self._lst_active.pack(fill="both", expand=True)
+        sb_active.config(command=self._lst_active.yview)
+
+        ttk.Button(frm_left, text="Ausgewählte entfernen", command=self._on_remove_plotted).pack(fill="x", padx=4, pady=(0, 4))
+
+        # Right: matplotlib canvas
+        frm_right = ttk.Frame(frm)
+        frm_right.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+
+        self._fig = Figure(figsize=(7, 4), dpi=100)
+        self._ax = self._fig.add_subplot(111)
+        self._ax.set_xlabel("Zeit (s)")
+        self._ax.set_ylabel("Wert")
+        self._ax.grid(True, alpha=0.3)
+        self._fig.tight_layout()
+
+        self._canvas = FigureCanvasTkAgg(self._fig, master=frm_right)
+        self._canvas.draw()
+
+        toolbar = NavigationToolbar2Tk(self._canvas, frm_right)
+        toolbar.update()
+        self._canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        self._plotted_channels: list[str] = []
 
     def _build_export_tab(self) -> None:
         frm = self._frm_export
@@ -139,10 +211,12 @@ class App(tk.Tk):
     def _run_analyze(self) -> None:
         assert self._mf4_path is not None
         try:
+            self._mdf = MDF(str(self._mf4_path))
             info = analyze_mf4(self._mf4_path)
             self._analysis = info
             self.after(0, self._populate_meta, info)
             self.after(0, self._populate_tree, info)
+            self.after(0, self._populate_channel_list, info)
             self.after(0, self._set_status, f"Analyse abgeschlossen – {info['channel_count']} Kanäle, {info['group_count']} Gruppen")
         except Exception as exc:
             self.after(0, messagebox.showerror, "Fehler", str(exc))
@@ -228,6 +302,111 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ Helpers
     def _set_status(self, msg: str) -> None:
+        self._var_status.set(msg)
+
+    def _populate_channel_list(self, info: dict) -> None:
+        self._all_channel_names = info["all_channel_names"]
+        self._lst_channels.delete(0, "end")
+        for name in self._all_channel_names:
+            self._lst_channels.insert("end", name)
+        # Reset plot state
+        self._plotted_channels.clear()
+        self._lst_active.delete(0, "end")
+        self._ax.clear()
+        self._ax.set_xlabel("Zeit (s)")
+        self._ax.set_ylabel("Wert")
+        self._ax.grid(True, alpha=0.3)
+        self._canvas.draw()
+
+    def _on_channel_filter(self, *_args: object) -> None:
+        pattern = self._var_ch_filter.get().strip().upper()
+        self._lst_channels.delete(0, "end")
+        for name in self._all_channel_names:
+            if not pattern or pattern in name.upper():
+                self._lst_channels.insert("end", name)
+
+    def _on_clear_selection(self) -> None:
+        self._lst_channels.selection_clear(0, "end")
+
+    def _on_plot(self) -> None:
+        sel_indices = self._lst_channels.curselection()
+        if not sel_indices:
+            messagebox.showinfo("Hinweis", "Bitte mindestens einen Kanal auswählen.")
+            return
+        if not self._mdf:
+            messagebox.showwarning("Fehler", "Bitte zuerst eine MF4-Datei analysieren.")
+            return
+        new_channels = [self._lst_channels.get(i) for i in sel_indices]
+        # Add only channels not already plotted
+        to_add = [ch for ch in new_channels if ch not in self._plotted_channels]
+        if not to_add:
+            messagebox.showinfo("Hinweis", "Alle ausgewählten Kanäle sind bereits geplottet.")
+            return
+        self._set_status(f"Lade {len(to_add)} Kanal/Kanäle …")
+        threading.Thread(target=self._run_plot, args=(to_add,), daemon=True).start()
+
+    def _run_plot(self, channels: list[str]) -> None:
+        assert self._mdf is not None
+        try:
+            signals: list[tuple[str, object, object]] = []
+            for ch_name in channels:
+                try:
+                    sig = self._mdf.get(ch_name)
+                    signals.append((ch_name, sig.timestamps, sig.samples))
+                except Exception:
+                    pass  # skip channels that can't be read
+            if signals:
+                self.after(0, self._update_plot, signals)
+            else:
+                self.after(0, messagebox.showwarning, "Fehler", "Keine der ausgewählten Kanäle konnte gelesen werden.")
+            self.after(0, self._set_status, f"{len(signals)} Kanal/Kanäle geladen.")
+        except Exception as exc:
+            self.after(0, messagebox.showerror, "Fehler", str(exc))
+            self.after(0, self._set_status, "Plot fehlgeschlagen.")
+
+    def _update_plot(self, signals: list[tuple[str, object, object]]) -> None:
+        for ch_name, timestamps, samples in signals:
+            self._ax.plot(timestamps, samples, label=ch_name, linewidth=0.8)
+            self._plotted_channels.append(ch_name)
+            self._lst_active.insert("end", ch_name)
+        self._ax.set_xlabel("Zeit (s)")
+        self._ax.set_ylabel("Wert")
+        self._ax.legend(fontsize=7, loc="upper right")
+        self._ax.grid(True, alpha=0.3)
+        self._fig.tight_layout()
+        self._canvas.draw()
+
+    def _on_remove_plotted(self) -> None:
+        sel_indices = list(self._lst_active.curselection())
+        if not sel_indices:
+            messagebox.showinfo("Hinweis", "Bitte Kanäle in der 'Aktive Kanäle'-Liste auswählen.")
+            return
+        to_remove = {self._lst_active.get(i) for i in sel_indices}
+        self._plotted_channels = [ch for ch in self._plotted_channels if ch not in to_remove]
+        # Refresh active list
+        self._lst_active.delete(0, "end")
+        for ch in self._plotted_channels:
+            self._lst_active.insert("end", ch)
+        # Redraw
+        self._redraw_plot()
+
+    def _redraw_plot(self) -> None:
+        if not self._mdf:
+            return
+        self._ax.clear()
+        self._ax.set_xlabel("Zeit (s)")
+        self._ax.set_ylabel("Wert")
+        self._ax.grid(True, alpha=0.3)
+        for ch_name in self._plotted_channels:
+            try:
+                sig = self._mdf.get(ch_name)
+                self._ax.plot(sig.timestamps, sig.samples, label=ch_name, linewidth=0.8)
+            except Exception:
+                pass
+        if self._plotted_channels:
+            self._ax.legend(fontsize=7, loc="upper right")
+        self._fig.tight_layout()
+        self._canvas.draw()
         self._var_status.set(msg)
 
 
