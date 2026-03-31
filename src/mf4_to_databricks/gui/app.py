@@ -286,7 +286,9 @@ class App(tk.Tk):
     def _run_export(self, out: str, raster: float | None, group_indices: list[int] | None) -> None:
         try:
             assert self._mf4_path is not None
-            df = mf4_to_dataframe(self._mf4_path, raster=raster, group_indices=group_indices)
+            # Reuse already-loaded MDF if available, else open from file
+            source = self._mdf if self._mdf is not None else self._mf4_path
+            df = mf4_to_dataframe(source, raster=raster, group_indices=group_indices)
             result = dataframe_to_parquet(df, out)
             size_mb = result.stat().st_size / 1024 / 1024
             self.after(
@@ -297,7 +299,10 @@ class App(tk.Tk):
             )
             self.after(0, self._set_status, f"Export fertig → {result}")
         except Exception as exc:
-            self.after(0, messagebox.showerror, "Fehler beim Export", str(exc))
+            import traceback
+            tb = traceback.format_exc()
+            self.after(0, messagebox.showerror, "Fehler beim Export", f"{exc}\n\n{tb}")
+            self.after(0, self._set_status, "Export fehlgeschlagen.")
             self.after(0, self._set_status, "Export fehlgeschlagen.")
 
     # ------------------------------------------------------------ Helpers
